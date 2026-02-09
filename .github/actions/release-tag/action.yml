@@ -1,0 +1,55 @@
+name: "Release Tag and GitHub Release"
+description: "Bump version, create git tag, and publish a GitHub release with commit history"
+
+outputs:
+  new_tag:
+    description: "The newly created git tag"
+    value: ${{ steps.tag_version.outputs.new_tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Bump version and push tag
+      id: tag_version
+      uses: anothrNick/github-tag-action@1.75.0
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+        DEFAULT_BUMP: patch
+        WITH_V: true
+
+    - name: Get commit messages since last tag
+      id: commits
+      shell: bash
+      run: |
+        last_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+        if [ -z "$last_tag" ]; then
+          log=$(git log --pretty=format:"- %s")
+        else
+          log=$(git log $last_tag..HEAD --pretty=format:"- %s")
+        fi
+
+        log="${log//'%'/'%25'}"
+        log="${log//$'\n'/'%0A'}"
+        log="${log//$'\r'/'%0D'}"
+
+        echo "commits=$log" >> $GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      if: steps.tag_version.outputs.new_tag != ''
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag_version.outputs.new_tag }}
+        name: Release ${{ steps.tag_version.outputs.new_tag }}
+        body: |
+          🚀 Automatic release for version ${{ steps.tag_version.outputs.new_tag }}
+
+          ### Commits in this release:
+          ${{ steps.commits.outputs.commits }}
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}

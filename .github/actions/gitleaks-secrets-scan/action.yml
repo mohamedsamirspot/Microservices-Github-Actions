@@ -1,0 +1,15 @@
+name: "Gitleaks Secrets Scan"
+description: "Run gitleaks to detect secrets in the repository"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Run gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
