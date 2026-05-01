@@ -5,19 +5,23 @@ inputs:
     description: 'Working directory for Semgrep'
     required: false
     default: '.'
-  error-threshold:
+  semgrep-config:
+    description: 'Semgrep config(s) to use. Use YAML block scalar syntax with |- and list each config on a new line (e.g., semgrep-config: |-\n  p/security-audit\n  p/owasp-top-ten\n  p/php\n  p/java\n  p/javascript\n  p/typescript\n  p/nodejs)'
+    required: false
+    default: 'auto'
+  semgrep-error-threshold:
     description: 'Number of ERROR severity findings to fail the pipeline. Set to 0 to disable (default: 0 - disabled)'
     required: false
     default: '0'
-  confidence-threshold:
+  semgrep-confidence-threshold:
     description: 'Minimum confidence level to count towards error threshold. Options: NONE (disabled), LOW, MEDIUM, HIGH (default: NONE - all findings count)'
     required: false
     default: 'NONE'
-  exclude-patterns:
+  semgrep-exclude-patterns:
     description: 'CLI exclude patterns to preserve Semgrep defaults. Use YAML block scalar syntax with |- and list each pattern on a new line either directories or files (e.g., exclude-patterns: |-\n  IntegrationTests/\n  renovate.json)'
     required: false
     default: ''
-  disable-rules:
+  semgrep-disable-rules:
     description: 'Specific rule IDs to disable (newline-separated, e.g., disable-rules: |-\n  java.lang.security.sql-injection\n  python.django.security.injection.sql-injection)'
     required: false
     default: ''
@@ -38,29 +42,39 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
+        # Build config flags if provided
+        CONFIG_FLAGS=""
+        if [ -n "${{ inputs.semgrep-config }}" ]; then
+          while IFS= read -r config; do
+            if [ -n "$config" ]; then
+              CONFIG_FLAGS="$CONFIG_FLAGS --config=$config"
+            fi
+          done <<< "${{ inputs.semgrep-config }}"
+        fi
+
         # Build exclude flags if provided (uses CLI, preserves defaults)
         EXCLUDE_FLAGS=""
-        if [ -n "${{ inputs.exclude-patterns }}" ]; then
+        if [ -n "${{ inputs.semgrep-exclude-patterns }}" ]; then
           while IFS= read -r pattern; do
             if [ -n "$pattern" ]; then
               EXCLUDE_FLAGS="$EXCLUDE_FLAGS --exclude=$pattern"
             fi
-          done <<< "${{ inputs.exclude-patterns }}"
+          done <<< "${{ inputs.semgrep-exclude-patterns }}"
         fi
         
         # Build exclude rules flags if provided
         EXCLUDE_RULES_FLAGS=""
-        if [ -n "${{ inputs.disable-rules }}" ]; then
+        if [ -n "${{ inputs.semgrep-disable-rules }}" ]; then
           while IFS= read -r rule; do
             if [ -n "$rule" ]; then
               EXCLUDE_RULES_FLAGS="$EXCLUDE_RULES_FLAGS --exclude-rule=$rule"
             fi
-          done <<< "${{ inputs.disable-rules }}"
+          done <<< "${{ inputs.semgrep-disable-rules }}"
         fi
         
         # Run semgrep scan (ignore exit code since we handle errors ourselves)
         semgrep ci \
-          --config=auto \
+          $CONFIG_FLAGS \
           --json \
           --output="semgrep-findings.json" \
           $EXCLUDE_FLAGS \
@@ -68,7 +82,7 @@ runs:
         
         # Check for ERROR severity findings and fail if threshold is exceeded
         if [ -f "semgrep-findings.json" ]; then
-          CONFIDENCE_THRESHOLD="${{ inputs.confidence-threshold }}"
+          CONFIDENCE_THRESHOLD="${{ inputs.semgrep-confidence-threshold }}"
           
           # Build jq filter based on confidence threshold
           if [ "$CONFIDENCE_THRESHOLD" = "NONE" ]; then
@@ -88,7 +102,7 @@ runs:
             ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-findings.json || echo "0")
           fi
           
-          ERROR_THRESHOLD=${{ inputs.error-threshold }}
+          ERROR_THRESHOLD=${{ inputs.semgrep-error-threshold }}
           if [ "$ERROR_THRESHOLD" -gt 0 ] && [ "$ERROR_COUNT" -ge "$ERROR_THRESHOLD" ]; then
             echo "❌ Pipeline failed: Found $ERROR_COUNT critical security error(s) (threshold: $ERROR_THRESHOLD, confidence: $CONFIDENCE_THRESHOLD)"
             exit 1
@@ -103,23 +117,31 @@ runs:
         echo "## 🔍 Semgrep SAST Scan Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Filters Applied:**" >> $GITHUB_STEP_SUMMARY
-        echo "- Error Threshold: ${{ inputs.error-threshold }} (0 = disabled)" >> $GITHUB_STEP_SUMMARY
-        echo "- Confidence Threshold: ${{ inputs.confidence-threshold }}" >> $GITHUB_STEP_SUMMARY
-        if [ -n "${{ inputs.exclude-patterns }}" ]; then
+        if [ -n "${{ inputs.semgrep-config }}" ]; then
+          echo "- Configs:" >> $GITHUB_STEP_SUMMARY
+          while IFS= read -r config; do
+            if [ -n "$config" ]; then
+              echo "  - \`$config\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          done <<< "${{ inputs.semgrep-config }}"
+        fi
+        echo "- Error Threshold: ${{ inputs.semgrep-error-threshold }} (0 = disabled)" >> $GITHUB_STEP_SUMMARY
+        echo "- Confidence Threshold: ${{ inputs.semgrep-confidence-threshold }}" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ inputs.semgrep-exclude-patterns }}" ]; then
           echo "- Exclude Patterns:" >> $GITHUB_STEP_SUMMARY
           while IFS= read -r pattern; do
             if [ -n "$pattern" ]; then
               echo "  - \`$pattern\`" >> $GITHUB_STEP_SUMMARY
             fi
-          done <<< "${{ inputs.exclude-patterns }}"
+          done <<< "${{ inputs.semgrep-exclude-patterns }}"
         fi
-        if [ -n "${{ inputs.disable-rules }}" ]; then
+        if [ -n "${{ inputs.semgrep-disable-rules }}" ]; then
           echo "- Disabled Rules (removed from scan):" >> $GITHUB_STEP_SUMMARY
           while IFS= read -r rule; do
             if [ -n "$rule" ]; then
               echo "  - \`$rule\`" >> $GITHUB_STEP_SUMMARY
             fi
-          done <<< "${{ inputs.disable-rules }}"
+          done <<< "${{ inputs.semgrep-disable-rules }}"
         fi
         echo "" >> $GITHUB_STEP_SUMMARY
         if [ -f "semgrep-findings.json" ]; then
