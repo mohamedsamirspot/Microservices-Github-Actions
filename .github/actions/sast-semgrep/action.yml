@@ -61,7 +61,7 @@ runs:
             fi
           done <<< "${{ inputs.semgrep-exclude-patterns }}"
         fi
-        
+
         # Build exclude rules flags if provided
         EXCLUDE_RULES_FLAGS=""
         if [ -n "${{ inputs.semgrep-disable-rules }}" ]; then
@@ -71,7 +71,7 @@ runs:
             fi
           done <<< "${{ inputs.semgrep-disable-rules }}"
         fi
-        
+
         # Run semgrep scan (ignore exit code since we handle errors ourselves)
         semgrep ci \
           $CONFIG_FLAGS \
@@ -79,11 +79,11 @@ runs:
           --output="semgrep-findings.json" \
           $EXCLUDE_FLAGS \
           $EXCLUDE_RULES_FLAGS 2>&1 | grep -v "Has findings for blocking rules" || true
-        
+
         # Check for ERROR severity findings and fail if threshold is exceeded
         if [ -f "semgrep-findings.json" ]; then
           CONFIDENCE_THRESHOLD="${{ inputs.semgrep-confidence-threshold }}"
-          
+
           # Build jq filter based on confidence threshold
           if [ "$CONFIDENCE_THRESHOLD" = "NONE" ]; then
             # Count all ERROR findings regardless of confidence
@@ -101,7 +101,7 @@ runs:
             echo "⚠️ Warning: Invalid confidence-threshold '$CONFIDENCE_THRESHOLD'. Valid options: NONE, LOW, MEDIUM, HIGH. Defaulting to NONE."
             ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-findings.json || echo "0")
           fi
-          
+
           ERROR_THRESHOLD=${{ inputs.semgrep-error-threshold }}
           if [ "$ERROR_THRESHOLD" -gt 0 ] && [ "$ERROR_COUNT" -ge "$ERROR_THRESHOLD" ]; then
             echo "❌ Pipeline failed: Found $ERROR_COUNT critical security error(s) (threshold: $ERROR_THRESHOLD, confidence: $CONFIDENCE_THRESHOLD)"
@@ -153,8 +153,8 @@ runs:
             echo "**Total Findings: $FINDINGS**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             # Parse JSON and display detailed findings
-            cat semgrep-findings.json | jq -r '.results[] | 
-              (if .extra.severity == "ERROR" then "🔴 ERROR" 
+            cat semgrep-findings.json | jq -r '.results[] |
+              (if .extra.severity == "ERROR" then "🔴 ERROR"
                elif .extra.severity == "WARNING" then "⚠️ WARNING"
                else "ℹ️ INFO" end) as $severity |
               "**\($severity)** - \(.check_id)\n" +
