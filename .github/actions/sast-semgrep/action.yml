@@ -1,7 +1,7 @@
 name: Semgrep SAST Scan
 description: 'Run Semgrep static analysis security testing'
 inputs:
-  working-directory:
+  semgrep-working-directory:
     description: 'Working directory for Semgrep'
     required: false
     default: '.'
@@ -9,14 +9,10 @@ inputs:
     description: 'Semgrep config(s) to use. Use YAML block scalar syntax with |- and list each config on a new line (e.g., semgrep-config: |-\n  p/security-audit\n  p/owasp-top-ten\n  p/php\n  p/java\n  p/javascript\n  p/typescript\n  p/nodejs)'
     required: false
     default: 'auto'
-  semgrep-error-threshold:
-    description: 'Number of ERROR severity findings to fail the pipeline. Set to 0 to disable (default: 0 - disabled)'
+  semgrep-fail-on-confidence:
+    description: 'Fail the pipeline when ERROR findings exist at or above this confidence level. Leave empty to disable. Options: LOW, MEDIUM, HIGH'
     required: false
-    default: '0'
-  semgrep-confidence-threshold:
-    description: 'Minimum confidence level to count towards error threshold. Options: NONE (disabled), LOW, MEDIUM, HIGH (default: NONE - all findings count)'
-    required: false
-    default: 'NONE'
+    default: ''
   semgrep-exclude-patterns:
     description: 'CLI exclude patterns to preserve Semgrep defaults. Use YAML block scalar syntax with |- and list each pattern on a new line either directories or files (e.g., exclude-patterns: |-\n  IntegrationTests/\n  renovate.json)'
     required: false
@@ -40,109 +36,111 @@ runs:
 
     - name: Run Semgrep Scan
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ inputs.semgrep-working-directory }}
+      env:
+        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+        SEMGREP_EXCLUDE_PATTERNS: ${{ inputs.semgrep-exclude-patterns }}
+        SEMGREP_DISABLE_RULES: ${{ inputs.semgrep-disable-rules }}
+        SEMGREP_FAIL_ON_CONFIDENCE: ${{ inputs.semgrep-fail-on-confidence }}
       run: |
         # Build config flags if provided
-        CONFIG_FLAGS=""
-        if [ -n "${{ inputs.semgrep-config }}" ]; then
+        CONFIG_FLAGS=()
+        if [ -n "$SEMGREP_CONFIG" ]; then
           while IFS= read -r config; do
             if [ -n "$config" ]; then
-              CONFIG_FLAGS="$CONFIG_FLAGS --config=$config"
+              CONFIG_FLAGS+=(--config "$config")
             fi
-          done <<< "${{ inputs.semgrep-config }}"
+          done <<< "$SEMGREP_CONFIG"
         fi
-
         # Build exclude flags if provided (uses CLI, preserves defaults)
-        EXCLUDE_FLAGS=""
-        if [ -n "${{ inputs.semgrep-exclude-patterns }}" ]; then
+        EXCLUDE_FLAGS=()
+        if [ -n "$SEMGREP_EXCLUDE_PATTERNS" ]; then
           while IFS= read -r pattern; do
             if [ -n "$pattern" ]; then
-              EXCLUDE_FLAGS="$EXCLUDE_FLAGS --exclude=$pattern"
+              EXCLUDE_FLAGS+=(--exclude "$pattern")
             fi
-          done <<< "${{ inputs.semgrep-exclude-patterns }}"
+          done <<< "$SEMGREP_EXCLUDE_PATTERNS"
         fi
-
         # Build exclude rules flags if provided
-        EXCLUDE_RULES_FLAGS=""
-        if [ -n "${{ inputs.semgrep-disable-rules }}" ]; then
+        EXCLUDE_RULES_FLAGS=()
+        if [ -n "$SEMGREP_DISABLE_RULES" ]; then
           while IFS= read -r rule; do
             if [ -n "$rule" ]; then
-              EXCLUDE_RULES_FLAGS="$EXCLUDE_RULES_FLAGS --exclude-rule=$rule"
+              EXCLUDE_RULES_FLAGS+=(--exclude-rule "$rule")
             fi
-          done <<< "${{ inputs.semgrep-disable-rules }}"
+          done <<< "$SEMGREP_DISABLE_RULES"
         fi
-
         # Run semgrep scan (ignore exit code since we handle errors ourselves)
         semgrep ci \
-          $CONFIG_FLAGS \
+          "${CONFIG_FLAGS[@]}" \
           --json \
           --output="semgrep-findings.json" \
-          $EXCLUDE_FLAGS \
-          $EXCLUDE_RULES_FLAGS 2>&1 | grep -v "Has findings for blocking rules" || true
-
-        # Check for ERROR severity findings and fail if threshold is exceeded
+          "${EXCLUDE_FLAGS[@]}" \
+          "${EXCLUDE_RULES_FLAGS[@]}" 2>&1 | grep -v "Has findings for blocking rules" || true
+        # Fail on ERROR severity findings when a confidence threshold is configured
         if [ -f "semgrep-findings.json" ]; then
-          CONFIDENCE_THRESHOLD="${{ inputs.semgrep-confidence-threshold }}"
-
-          # Build jq filter based on confidence threshold
-          if [ "$CONFIDENCE_THRESHOLD" = "NONE" ]; then
-            # Count all ERROR findings regardless of confidence
-            ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-findings.json || echo "0")
-          elif [ "$CONFIDENCE_THRESHOLD" = "HIGH" ]; then
-            # Count only HIGH confidence ERROR findings
-            ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR" and (.extra.metadata.confidence // "LOW") == "HIGH")] | length' semgrep-findings.json || echo "0")
-          elif [ "$CONFIDENCE_THRESHOLD" = "MEDIUM" ]; then
-            # Count MEDIUM and HIGH confidence ERROR findings
-            ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR" and ((.extra.metadata.confidence // "LOW") == "HIGH" or (.extra.metadata.confidence // "LOW") == "MEDIUM"))] | length' semgrep-findings.json || echo "0")
-          elif [ "$CONFIDENCE_THRESHOLD" = "LOW" ]; then
-            # Count all ERROR findings (LOW, MEDIUM, HIGH)
-            ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-findings.json || echo "0")
-          else
-            echo "⚠️ Warning: Invalid confidence-threshold '$CONFIDENCE_THRESHOLD'. Valid options: NONE, LOW, MEDIUM, HIGH. Defaulting to NONE."
-            ERROR_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-findings.json || echo "0")
+          FAIL_ON_CONFIDENCE="${{ inputs.semgrep-fail-on-confidence }}"
+          ERROR_COUNT="0"
+          get_error_count() {
+            local jq_filter="$1"
+            if ! command -v jq >/dev/null 2>&1; then
+              echo "❌ Pipeline failed: jq is required to evaluate semgrep-fail-on-confidence, but it is not installed." >&2
+              exit 1
+            fi
+            local jq_output
+            if ! jq_output=$(jq "$jq_filter" semgrep-findings.json); then
+              echo "❌ Pipeline failed: Unable to parse semgrep-findings.json to evaluate semgrep-fail-on-confidence." >&2
+              exit 1
+            fi
+            printf '%s\n' "$jq_output"
+          }
+          if [ -n "$FAIL_ON_CONFIDENCE" ]; then
+            if [ "$FAIL_ON_CONFIDENCE" = "HIGH" ]; then
+              ERROR_COUNT=$(get_error_count '[.results[] | select(.extra.severity == "ERROR" and (.extra.metadata.confidence // "LOW") == "HIGH")] | length')
+            elif [ "$FAIL_ON_CONFIDENCE" = "MEDIUM" ]; then
+              ERROR_COUNT=$(get_error_count '[.results[] | select(.extra.severity == "ERROR" and ((.extra.metadata.confidence // "LOW") == "HIGH" or (.extra.metadata.confidence // "LOW") == "MEDIUM"))] | length')
+            elif [ "$FAIL_ON_CONFIDENCE" = "LOW" ]; then
+              ERROR_COUNT=$(get_error_count '[.results[] | select(.extra.severity == "ERROR")] | length')
+            else
+              echo "⚠️ Warning: Invalid semgrep-fail-on-confidence value '$FAIL_ON_CONFIDENCE'. Valid options: LOW, MEDIUM, HIGH. Skipping fail-on-confidence check."
+            fi
           fi
-
-          ERROR_THRESHOLD=${{ inputs.semgrep-error-threshold }}
-          if [ "$ERROR_THRESHOLD" -gt 0 ] && [ "$ERROR_COUNT" -ge "$ERROR_THRESHOLD" ]; then
-            echo "❌ Pipeline failed: Found $ERROR_COUNT critical security error(s) (threshold: $ERROR_THRESHOLD, confidence: $CONFIDENCE_THRESHOLD)"
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "❌ Pipeline failed: Found $ERROR_COUNT ERROR severity finding(s) at or above confidence $FAIL_ON_CONFIDENCE"
             exit 1
           fi
         fi
-
     - name: Create Findings Summary
       shell: bash
       if: always()
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ inputs.semgrep-working-directory }}
       run: |
+        format_multiline_input() {
+          local label="$1"
+          local value="$2"
+          if [ -n "$value" ]; then
+            echo "- $label:" >> $GITHUB_STEP_SUMMARY
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                echo "  - \`$line\`" >> $GITHUB_STEP_SUMMARY
+              fi
+            done <<< "$value"
+          else
+            echo "- $label: disabled" >> $GITHUB_STEP_SUMMARY
+          fi
+        }
         echo "## 🔍 Semgrep SAST Scan Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Filters Applied:**" >> $GITHUB_STEP_SUMMARY
-        if [ -n "${{ inputs.semgrep-config }}" ]; then
-          echo "- Configs:" >> $GITHUB_STEP_SUMMARY
-          while IFS= read -r config; do
-            if [ -n "$config" ]; then
-              echo "  - \`$config\`" >> $GITHUB_STEP_SUMMARY
-            fi
-          done <<< "${{ inputs.semgrep-config }}"
+        echo "- Working Directory: \`${{ inputs.semgrep-working-directory }}\`" >> $GITHUB_STEP_SUMMARY
+        format_multiline_input "Configs" "${{ inputs.semgrep-config }}"
+        if [ -n "${{ inputs.semgrep-fail-on-confidence }}" ]; then
+          echo "- Fail Pipeline on ERROR Findings With Confidence: ${{ inputs.semgrep-fail-on-confidence }}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- Fail Pipeline on ERROR Findings With Confidence: disabled" >> $GITHUB_STEP_SUMMARY
         fi
-        echo "- Error Threshold: ${{ inputs.semgrep-error-threshold }} (0 = disabled)" >> $GITHUB_STEP_SUMMARY
-        echo "- Confidence Threshold: ${{ inputs.semgrep-confidence-threshold }}" >> $GITHUB_STEP_SUMMARY
-        if [ -n "${{ inputs.semgrep-exclude-patterns }}" ]; then
-          echo "- Exclude Patterns:" >> $GITHUB_STEP_SUMMARY
-          while IFS= read -r pattern; do
-            if [ -n "$pattern" ]; then
-              echo "  - \`$pattern\`" >> $GITHUB_STEP_SUMMARY
-            fi
-          done <<< "${{ inputs.semgrep-exclude-patterns }}"
-        fi
-        if [ -n "${{ inputs.semgrep-disable-rules }}" ]; then
-          echo "- Disabled Rules (removed from scan):" >> $GITHUB_STEP_SUMMARY
-          while IFS= read -r rule; do
-            if [ -n "$rule" ]; then
-              echo "  - \`$rule\`" >> $GITHUB_STEP_SUMMARY
-            fi
-          done <<< "${{ inputs.semgrep-disable-rules }}"
-        fi
+        format_multiline_input "Exclude Patterns" "${{ inputs.semgrep-exclude-patterns }}"
+        format_multiline_input "Disabled Rules (removed from scan)" "${{ inputs.semgrep-disable-rules }}"
         echo "" >> $GITHUB_STEP_SUMMARY
         if [ -f "semgrep-findings.json" ]; then
           FINDINGS=$(jq '.results | length' semgrep-findings.json || echo "0")
@@ -154,7 +152,7 @@ runs:
             echo "" >> $GITHUB_STEP_SUMMARY
             # Parse JSON and display detailed findings
             cat semgrep-findings.json | jq -r '.results[] |
-              (if .extra.severity == "ERROR" then "🔴 ERROR"
+              (if .extra.severity == "ERROR" then "🔴 ERROR" 
                elif .extra.severity == "WARNING" then "⚠️ WARNING"
                else "ℹ️ INFO" end) as $severity |
               "**\($severity)** - \(.check_id)\n" +
