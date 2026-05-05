@@ -52,6 +52,7 @@ runs:
             fi
           done <<< "$SEMGREP_CONFIG"
         fi
+
         # Build exclude flags if provided (uses CLI, preserves defaults)
         EXCLUDE_FLAGS=()
         if [ -n "$SEMGREP_EXCLUDE_PATTERNS" ]; then
@@ -61,6 +62,7 @@ runs:
             fi
           done <<< "$SEMGREP_EXCLUDE_PATTERNS"
         fi
+
         # Build exclude rules flags if provided
         EXCLUDE_RULES_FLAGS=()
         if [ -n "$SEMGREP_DISABLE_RULES" ]; then
@@ -70,6 +72,7 @@ runs:
             fi
           done <<< "$SEMGREP_DISABLE_RULES"
         fi
+
         # Run semgrep scan (ignore exit code since we handle errors ourselves)
         semgrep ci \
           "${CONFIG_FLAGS[@]}" \
@@ -77,23 +80,29 @@ runs:
           --output="semgrep-findings.json" \
           "${EXCLUDE_FLAGS[@]}" \
           "${EXCLUDE_RULES_FLAGS[@]}" 2>&1 | grep -v "Has findings for blocking rules" || true
+
         # Fail on ERROR severity findings when a confidence threshold is configured
         if [ -f "semgrep-findings.json" ]; then
           FAIL_ON_CONFIDENCE="${{ inputs.semgrep-fail-on-confidence }}"
           ERROR_COUNT="0"
+
           get_error_count() {
             local jq_filter="$1"
+
             if ! command -v jq >/dev/null 2>&1; then
               echo "❌ Pipeline failed: jq is required to evaluate semgrep-fail-on-confidence, but it is not installed." >&2
               exit 1
             fi
+
             local jq_output
             if ! jq_output=$(jq "$jq_filter" semgrep-findings.json); then
               echo "❌ Pipeline failed: Unable to parse semgrep-findings.json to evaluate semgrep-fail-on-confidence." >&2
               exit 1
             fi
+
             printf '%s\n' "$jq_output"
           }
+
           if [ -n "$FAIL_ON_CONFIDENCE" ]; then
             if [ "$FAIL_ON_CONFIDENCE" = "HIGH" ]; then
               ERROR_COUNT=$(get_error_count '[.results[] | select(.extra.severity == "ERROR" and (.extra.metadata.confidence // "LOW") == "HIGH")] | length')
@@ -105,11 +114,13 @@ runs:
               echo "⚠️ Warning: Invalid semgrep-fail-on-confidence value '$FAIL_ON_CONFIDENCE'. Valid options: LOW, MEDIUM, HIGH. Skipping fail-on-confidence check."
             fi
           fi
+
           if [ "$ERROR_COUNT" -gt 0 ]; then
             echo "❌ Pipeline failed: Found $ERROR_COUNT ERROR severity finding(s) at or above confidence $FAIL_ON_CONFIDENCE"
             exit 1
           fi
         fi
+
     - name: Create Findings Summary
       shell: bash
       if: always()
@@ -118,6 +129,7 @@ runs:
         format_multiline_input() {
           local label="$1"
           local value="$2"
+
           if [ -n "$value" ]; then
             echo "- $label:" >> $GITHUB_STEP_SUMMARY
             while IFS= read -r line; do
@@ -129,6 +141,7 @@ runs:
             echo "- $label: disabled" >> $GITHUB_STEP_SUMMARY
           fi
         }
+
         echo "## 🔍 Semgrep SAST Scan Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Filters Applied:**" >> $GITHUB_STEP_SUMMARY
@@ -155,10 +168,11 @@ runs:
               (if .extra.severity == "ERROR" then "🔴 ERROR" 
                elif .extra.severity == "WARNING" then "⚠️ WARNING"
                else "ℹ️ INFO" end) as $severity |
+              (.extra.metadata.source_rule_url // "https://semgrep.dev/r/\(.check_id)") as $docs_url |
               "**\($severity)** - \(.check_id)\n" +
               "📁 \(.path):\(.start.line // "?")\n" +
               "📝 \(.extra.message // .message // "No description")\n" +
-              (if .extra.metadata.source_rule_url then "📚 Docs: \(.extra.metadata.source_rule_url)\n" else "" end) +
+              "📚 Docs: [\($docs_url)](\($docs_url))\n" +
               (if .extra.metadata.cwe and (.extra.metadata.cwe | length) > 0 then "🔗 CWE: \(.extra.metadata.cwe | join(", "))\n" else "" end) +
               (if .extra.metadata.confidence then "⚡ Confidence: \(.extra.metadata.confidence)\n" else "" end) +
               (if .extra.metadata.owasp and (.extra.metadata.owasp | length) > 0 then "🛡️ OWASP: \(.extra.metadata.owasp | join(", "))\n" else "" end) +
