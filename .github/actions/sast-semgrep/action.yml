@@ -30,9 +30,9 @@ runs:
       with:
         python-version: '3.14'
 
-    - name: Install Semgrep (v1.159.0)
+    - name: Install Semgrep (v1.162.0)
       shell: bash
-      run: pip install semgrep==1.159.0
+      run: pip install semgrep==1.162.0
 
     - name: Run Semgrep Scan
       shell: bash
