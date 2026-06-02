@@ -144,7 +144,9 @@ runs:
 
         echo "## 🔍 Semgrep SAST Scan Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Filters Applied:**" >> $GITHUB_STEP_SUMMARY
+        echo "<details>" >> $GITHUB_STEP_SUMMARY
+        echo "<summary><strong>Filters Applied</strong></summary>" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "- Working Directory: \`${{ inputs.semgrep-working-directory }}\`" >> $GITHUB_STEP_SUMMARY
         format_multiline_input "Configs" "${{ inputs.semgrep-config }}"
         if [ -n "${{ inputs.semgrep-fail-on-confidence }}" ]; then
@@ -155,30 +157,41 @@ runs:
         format_multiline_input "Exclude Patterns" "${{ inputs.semgrep-exclude-patterns }}"
         format_multiline_input "Disabled Rules (removed from scan)" "${{ inputs.semgrep-disable-rules }}"
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "</details>" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         if [ -f "semgrep-findings.json" ]; then
           FINDINGS=$(jq '.results | length' semgrep-findings.json || echo "0")
           if [ "$FINDINGS" -gt 0 ]; then
-            echo "<details>" >> $GITHUB_STEP_SUMMARY
-            echo "<summary>Show Findings ($FINDINGS total)</summary>" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Total Findings: $FINDINGS**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            # Parse JSON and display detailed findings
-            cat semgrep-findings.json | jq -r '.results[] |
-              (if .extra.severity == "ERROR" then "🔴 ERROR" 
+            # Parse JSON and display each finding with a visible title and collapsible details
+            jq -r '.results
+              | sort_by(
+                  (if .extra.severity == "ERROR" then 0
+                   elif .extra.severity == "WARNING" then 1
+                   else 2 end),
+                  (.check_id // "")
+                )[] |
+              def cell: tostring | gsub("\\|"; "\\\\|") | gsub("\\r?\\n"; "<br>");
+              (if .extra.severity == "ERROR" then "🔴 ERROR"
                elif .extra.severity == "WARNING" then "⚠️ WARNING"
                else "ℹ️ INFO" end) as $severity |
               (.extra.metadata.source_rule_url // "https://semgrep.dev/r/\(.check_id)") as $docs_url |
-              "**\($severity)** - \(.check_id)\n" +
-              "📁 \(.path):\(.start.line // "?")\n" +
-              "📝 \(.extra.message // .message // "No description")\n" +
-              "📚 Docs: [\($docs_url)](\($docs_url))\n" +
-              (if .extra.metadata.cwe and (.extra.metadata.cwe | length) > 0 then "🔗 CWE: \(.extra.metadata.cwe | join(", "))\n" else "" end) +
-              (if .extra.metadata.confidence then "⚡ Confidence: \(.extra.metadata.confidence)\n" else "" end) +
-              (if .extra.metadata.owasp and (.extra.metadata.owasp | length) > 0 then "🛡️ OWASP: \(.extra.metadata.owasp | join(", "))\n" else "" end) +
-              "\n---\n"' >> $GITHUB_STEP_SUMMARY || \
-            grep -o '"check_id":"[^"]*"' semgrep-findings.json | sed 's/"check_id":"\(.*\)"/\1\n\n---\n/' >> $GITHUB_STEP_SUMMARY
-            echo "</details>" >> $GITHUB_STEP_SUMMARY
+              ((.extra.metadata.cwe // []) | if type == "array" and length > 0 then join(", ") else "-" end) as $cwe |
+              ((.extra.metadata.confidence // "-") | tostring) as $confidence |
+              ((.extra.metadata.owasp // []) | if type == "array" and length > 0 then join(", ") else "-" end) as $owasp |
+              "<details>\n" +
+              "<summary>\($severity) - \(.check_id)</summary>\n\n" +
+              "<table>\n" +
+              "  <tr><td>📁 Location</td><td>\((.path + ":" + ((.start.line // "?") | tostring)) | cell)</td></tr>\n" +
+              "  <tr><td>📝 Message</td><td>\((.extra.message // .message // "No description") | cell)</td></tr>\n" +
+              "  <tr><td>📚 Docs</td><td><a href=\"\($docs_url)\">\($docs_url)</a></td></tr>\n" +
+              "  <tr><td>🔗 CWE</td><td>\($cwe | cell)</td></tr>\n" +
+              "  <tr><td>⚡ Confidence</td><td>\($confidence | cell)</td></tr>\n" +
+              "  <tr><td>🛡️ OWASP</td><td>\($owasp | cell)</td></tr>\n" +
+              "</table>\n\n" +
+              "</details>\n\n"' semgrep-findings.json >> $GITHUB_STEP_SUMMARY || \
+            grep -o '"check_id":"[^"]*"' semgrep-findings.json | sed 's/"check_id":"\(.*\)"/<details>\n<summary>\1<\/summary>\n\nNo additional details available.\n\n<\/details>\n/' >> $GITHUB_STEP_SUMMARY
           else
             echo "✅ No security issues detected" >> $GITHUB_STEP_SUMMARY
           fi
