@@ -1,0 +1,322 @@
+name: Stale Branch Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'repository: Target repository in owner/name format. Base input for all checks. Example: VFDE-Portals/SomeOtherRepo.'
+        required: true
+        type: string
+      dry_run:
+        description: 'dry_run: true reports candidates only; false deletes branches after all checks pass. Example: true'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      days_threshold:
+        description: 'days_threshold: Delete only when branch age is greater than this value in days. Evaluated per branch in repository. Example: 30'
+        required: false
+        default: '30'
+        type: string
+      protected_branch_patterns:
+        description: 'protected_branch_patterns: Comma-separated globs protected from deletion. Used with excluded_protected_branch_patterns. Example: release/*,dev,test,preprod,prod,uat'
+        required: false
+        default: 'release/*,dev,develop,test,qa,sit,uat,stage,staging,preprod,prod,production,int,integration'
+        type: string
+      excluded_protected_branch_patterns:
+        description: 'excluded_protected_branch_patterns: Branch names or globs removed from protected_branch_patterns at evaluation time. Example: uat'
+        required: false
+        default: ''
+        type: string
+      preserved_branch_patterns:
+        description: 'preserved_branch_patterns: Additional branch names or globs that should never be deleted, even if not in protected_branch_patterns. Example: keep-this-branch,experiment/*'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Parse target repository
+        id: target_repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${{ github.event.inputs.repository }}"
+          echo "owner=${repo%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${repo##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.REPOSITORY_READ_WRITE_APP_ID }}
+          private-key: ${{ secrets.REPOSITORY_READ_WRITE_APP_KEY }}
+          owner: ${{ steps.target_repo.outputs.owner }}
+          repositories: ${{ steps.target_repo.outputs.name }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.inputs.repository }}
+          token: ${{ steps.app_token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Delete merged stale branches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          INPUT_REPOSITORY: ${{ github.event.inputs.repository || '' }}
+          INPUT_DAYS_THRESHOLD: ${{ github.event.inputs.days_threshold || '' }}
+          INPUT_PROTECTED_BRANCH_PATTERNS: ${{ github.event.inputs.protected_branch_patterns || '' }}
+          INPUT_EXCLUDED_PROTECTED_BRANCH_PATTERNS: ${{ github.event.inputs.excluded_protected_branch_patterns || '' }}
+          INPUT_PRESERVED_BRANCH_PATTERNS: ${{ github.event.inputs.preserved_branch_patterns || '' }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run || '' }}
+        run: |
+          set -euo pipefail
+
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+          target_repository="$INPUT_REPOSITORY"
+          if [[ -z "$target_repository" ]]; then
+            echo "::error::repository input is required"
+            exit 1
+          fi
+
+          if ! [[ "$target_repository" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "::error::repository must be in owner/repo format. Got: $target_repository"
+            exit 1
+          fi
+
+          days_threshold="${INPUT_DAYS_THRESHOLD:-30}"
+          protected_branch_patterns="${INPUT_PROTECTED_BRANCH_PATTERNS:-release/*,dev,develop,test,qa,sit,uat,stage,staging,preprod,prod,production,int,integration}"
+          excluded_protected_branch_patterns="${INPUT_EXCLUDED_PROTECTED_BRANCH_PATTERNS:-}"
+          preserved_branch_patterns="${INPUT_PRESERVED_BRANCH_PATTERNS:-}"
+          dry_run="${INPUT_DRY_RUN:-true}"
+
+          if ! default_branch="$(gh api "repos/$target_repository" --jq '.default_branch')"; then
+            echo "::error::Failed to query default branch for $target_repository"
+            exit 1
+          fi
+
+          if [[ -z "$default_branch" ]]; then
+            echo "::error::Received empty default branch for $target_repository"
+            exit 1
+          fi
+
+          if ! [[ "$days_threshold" =~ ^[0-9]+$ ]]; then
+            echo "::error::days_threshold must be a non-negative integer. Got: $days_threshold"
+            exit 1
+          fi
+
+          now_epoch="$(date +%s)"
+
+          normalize_csv() {
+            local csv="$1"
+            echo "$csv" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | sed '/^$/d'
+          }
+
+          branch_matches_exact() {
+            local branch="$1"
+            shift
+            local candidate
+            for candidate in "$@"; do
+              if [[ "$branch" == "$candidate" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          branch_matches_any_glob() {
+            local branch="$1"
+            shift
+            local pattern
+            for pattern in "$@"; do
+              if [[ "$branch" == $pattern ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          mapfile -t protected_globs < <(normalize_csv "$default_branch,$protected_branch_patterns")
+          mapfile -t excluded_protected_globs < <(normalize_csv "$excluded_protected_branch_patterns")
+          mapfile -t preserved_globs < <(normalize_csv "$preserved_branch_patterns")
+
+          echo "Repository: $target_repository"
+          echo "Default branch: $default_branch"
+          echo "Threshold (days): $days_threshold"
+          echo "Protected patterns: ${protected_globs[*]:-none}"
+          echo "Excluded protected patterns: ${excluded_protected_globs[*]:-none}"
+          echo "Preserved patterns: ${preserved_globs[*]:-none}"
+          echo "Dry run: $dry_run"
+          echo ""
+
+          open_pr_head_refs_output="$(gh api --paginate "repos/$target_repository/pulls?state=open&per_page=100" --jq '.[].head.ref')"
+          open_pr_head_refs=()
+          if [[ -n "$open_pr_head_refs_output" ]]; then
+            mapfile -t open_pr_head_refs < <(printf '%s\n' "$open_pr_head_refs_output")
+          fi
+
+          echo "Open PR head refs discovered: ${#open_pr_head_refs[@]}"
+
+          mapfile -t all_remote_branches < <(
+            git for-each-ref --format='%(refname:short)' refs/remotes/origin \
+              | sed 's|^origin/||' \
+              | grep -Ev '^HEAD$' || true
+          )
+
+          mapfile -t merged_remote_branches < <(
+            git for-each-ref --merged="origin/$default_branch" --format='%(refname:short)' refs/remotes/origin \
+              | sed 's|^origin/||' \
+              | grep -Ev '^HEAD$' || true
+          )
+
+          declare -A merged_branch_set
+          for branch in "${merged_remote_branches[@]}"; do
+            merged_branch_set["$branch"]=1
+          done
+
+          skipped_not_merged=0
+          skipped_not_merged_open_pr=0
+          for branch in "${all_remote_branches[@]}"; do
+            if [[ -z "${merged_branch_set[$branch]+x}" ]]; then
+              skipped_not_merged=$((skipped_not_merged + 1))
+              if [[ ${#open_pr_head_refs[@]} -gt 0 ]] && branch_matches_exact "$branch" "${open_pr_head_refs[@]}"; then
+                skipped_not_merged_open_pr=$((skipped_not_merged_open_pr + 1))
+              fi
+            fi
+          done
+
+          echo "Remote branches discovered: ${#all_remote_branches[@]}"
+          echo "Merged remote branches discovered: ${#merged_remote_branches[@]}"
+          echo "Not merged into $default_branch: $skipped_not_merged"
+
+          deleted_count=0
+          skipped_protected=0
+          skipped_preserved=0
+          skipped_open_pr=0
+          skipped_recent=0
+          skipped_no_commit=0
+          skipped_delete_error=0
+
+          deleted_branches=""
+          would_delete_branches=""
+          skipped_branches=""
+
+          for branch in "${merged_remote_branches[@]}"; do
+            if [[ "$branch" == "$default_branch" ]]; then
+              skipped_protected=$((skipped_protected + 1))
+              skipped_branches+="- $branch (default branch)"$'\n'
+              echo "Skipping default branch: $branch"
+              continue
+            fi
+
+            if [[ ${#excluded_protected_globs[@]} -gt 0 ]] && branch_matches_any_glob "$branch" "${excluded_protected_globs[@]}"; then
+              echo "Branch excluded from protected set: $branch"
+            elif branch_matches_any_glob "$branch" "${protected_globs[@]}"; then
+              skipped_protected=$((skipped_protected + 1))
+              skipped_branches+="- $branch (protected pattern)"$'\n'
+              echo "Skipping protected branch: $branch"
+              continue
+            fi
+
+            if [[ ${#preserved_globs[@]} -gt 0 ]] && branch_matches_any_glob "$branch" "${preserved_globs[@]}"; then
+              skipped_preserved=$((skipped_preserved + 1))
+              skipped_branches+="- $branch (preserved pattern)"$'\n'
+              echo "Skipping preserved branch: $branch"
+              continue
+            fi
+
+            last_commit_epoch="$(git log -1 --format=%ct "origin/$branch" 2>/dev/null || true)"
+            if [[ -z "$last_commit_epoch" ]]; then
+              skipped_no_commit=$((skipped_no_commit + 1))
+              skipped_branches+="- $branch (commit lookup failed)"$'\n'
+              echo "Skipping branch with missing commit metadata: $branch"
+              continue
+            fi
+
+            branch_age_days=$(( (now_epoch - last_commit_epoch) / 86400 ))
+            if [[ "$branch_age_days" -le "$days_threshold" ]]; then
+              skipped_recent=$((skipped_recent + 1))
+              skipped_branches+="- $branch (recent: $branch_age_days days old)"$'\n'
+              echo "Skipping recent branch: $branch ($branch_age_days days old)"
+              continue
+            fi
+
+            if [[ ${#open_pr_head_refs[@]} -gt 0 ]] && branch_matches_exact "$branch" "${open_pr_head_refs[@]}"; then
+              skipped_open_pr=$((skipped_open_pr + 1))
+              skipped_branches+="- $branch (open PR)"$'\n'
+              echo "Skipping branch with open PR: $branch"
+              continue
+            fi
+
+            if [[ "$dry_run" == "true" ]]; then
+              would_delete_branches+="- $branch ($branch_age_days days old)"$'\n'
+              echo "[DRY RUN] Would delete stale branch: $branch ($branch_age_days days old)"
+              continue
+            fi
+
+            encoded_branch="$(jq -rn --arg value "$branch" '$value|@uri')"
+            if gh api -X DELETE "repos/$target_repository/git/refs/heads/$encoded_branch"; then
+              deleted_count=$((deleted_count + 1))
+              deleted_branches+="- $branch ($branch_age_days days old)"$'\n'
+              echo "Deleted stale branch: $branch ($branch_age_days days old)"
+            else
+              skipped_delete_error=$((skipped_delete_error + 1))
+              skipped_branches+="- $branch (delete failed)"$'\n'
+              echo "Failed to delete branch: $branch"
+            fi
+          done
+
+          {
+            echo "# Stale Branch Cleanup Summary"
+            echo ""
+            echo "## Configuration"
+            echo "- Repository: \`$target_repository\`"
+            echo "- Default branch: \`$default_branch\`"
+            echo "- Threshold: \`$days_threshold\` days"
+            echo "- Dry run: \`$dry_run\`"
+            echo "- Protected patterns: \`${protected_globs[*]:-none}\`"
+            echo "- Excluded protected patterns: \`${excluded_protected_globs[*]:-none}\`"
+            echo "- Preserved patterns: \`${preserved_globs[*]:-none}\`"
+            echo ""
+            echo "## Results"
+            if [[ "$dry_run" == "true" ]]; then
+              echo "- Branches that would be deleted: $(printf '%s' "$would_delete_branches" | sed '/^$/d' | wc -l | tr -d ' ')"
+            else
+              echo "- Branches deleted: $deleted_count"
+            fi
+            echo "- Skipped (protected): $skipped_protected"
+            echo "- Skipped (preserved): $skipped_preserved"
+            echo "- Skipped (open PR): $skipped_open_pr"
+            echo "- Skipped (recent): $skipped_recent"
+            echo "- Skipped (not merged into $default_branch): $skipped_not_merged"
+            echo "- Skipped (branches with open PRs and not merged into $default_branch): $skipped_not_merged_open_pr"
+            echo "- Skipped (missing commit metadata): $skipped_no_commit"
+            echo "- Skipped (delete errors): $skipped_delete_error"
+            echo ""
+            if [[ -n "$would_delete_branches" ]]; then
+              echo "## Dry-run candidates"
+              printf '%s\n' "$would_delete_branches"
+              echo ""
+            fi
+            if [[ -n "$deleted_branches" ]]; then
+              echo "## Deleted branches"
+              printf '%s\n' "$deleted_branches"
+              echo ""
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$dry_run" == "true" ]]; then
+            echo "Dry run complete. No branches were deleted."
+          else
+            echo "Cleanup complete. Deleted branches: $deleted_count"
+          fi
