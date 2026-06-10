@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repository:
-        description: 'repository: Target repository in owner/name format. Base input for all checks. Example: VFDE-Portals/SomeOtherRepo.'
+        description: 'repository: Target repository in owner/name format. Base input for all checks. Example: Org-name/SomeOtherRepo.'
         required: true
         type: string
       dry_run:
