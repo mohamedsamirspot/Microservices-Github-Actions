@@ -62,7 +62,7 @@ jobs:
           repositories: ${{ steps.target_repo.outputs.name }}
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.inputs.repository }}
           token: ${{ steps.app_token.outputs.token }}
